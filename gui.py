@@ -23,7 +23,6 @@ class GradientProgress(tk.Canvas):
         self._corner = corner
         self._bg_color = "#1b1f23"
         self._border_color = "#2a3138"
-        self._text_color = "#d7dee7"
         self._font = ("Segoe UI", 10, "bold")
         self._stops = ["#ff3b30", "#ff9500", "#ffcc00", "#7cfc00", "#34c759"]
         self._glow = False
@@ -36,7 +35,8 @@ class GradientProgress(tk.Canvas):
         self._redraw()
 
     def start_glow(self):
-        if self._glow: return
+        if self._glow:
+            return
         self._glow = True
         self._animate_glow()
 
@@ -48,57 +48,83 @@ class GradientProgress(tk.Canvas):
         self._redraw()
 
     def _animate_glow(self):
-        if not self._glow: return
+        if not self._glow:
+            return
         self._glow_phase += 0.18
         self._redraw()
         self._glow_job = self.after(40, self._animate_glow)
 
-    def _hex_to_rgb(self, hx): hx = hx.lstrip("#"); return tuple(int(hx[i:i+2], 16) for i in (0,2,4))
-    def _rgb_to_hex(self, rgb): return "#%02x%02x%02x" % rgb
-    def _lerp(self, a, b, t): return a + (b - a) * t
+    def _hex_to_rgb(self, hx):
+        hx = hx.lstrip("#")
+        return tuple(int(hx[i:i+2], 16) for i in (0, 2, 4))
+
+    def _rgb_to_hex(self, rgb):
+        return "#%02x%02x%02x" % rgb
+
+    def _lerp(self, a, b, t):
+        return a + (b - a) * t
 
     def _color_lerp(self, c1, c2, t):
-        r1,g1,b1 = self._hex_to_rgb(c1); r2,g2,b2 = self._hex_to_rgb(c2)
-        r = int(self._lerp(r1, r2, t)); g = int(self._lerp(g1, g2, t)); b = int(self._lerp(b1, b2, t))
-        return self._rgb_to_hex((r,g,b))
+        r1, g1, b1 = self._hex_to_rgb(c1)
+        r2, g2, b2 = self._hex_to_rgb(c2)
+        r = int(self._lerp(r1, r2, t))
+        g = int(self._lerp(g1, g2, t))
+        b = int(self._lerp(b1, b2, t))
+        return self._rgb_to_hex((r, g, b))
 
     def _rounded_rect(self, x1, y1, x2, y2, r, **kwargs):
         self.create_polygon(
-            x1+r,y1, x2-r,y1, x2,y1, x2,y1+r, x2,y2-r, x2,y2, x2-r,y2, x1+r,y2, x1,y2, x1,y2-r,
-            x1,y1+r, x1,y1, smooth=True, **kwargs
+            x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
+            x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+            smooth=True, **kwargs
         )
 
     def _redraw(self):
         self.delete("all")
-        w = self.winfo_width(); h = self.winfo_height(); r = min(self._corner, h//2)
-        self._rounded_rect(1,1,w-1,h-1,r, fill=self._bg_color, outline=self._border_color, width=2)
+        w = self.winfo_width()
+        h = self.winfo_height()
+        r = min(self._corner, h // 2)
+
+        # background frame
+        self._rounded_rect(1, 1, w - 1, h - 1, r, fill=self._bg_color, outline=self._border_color, width=2)
+
+        # progress fill
         pct = self._value / 100.0
-        prog_w = max(0, int((w-4) * pct)); left=2; top=2; right=2+prog_w; bottom=h-2
+        prog_w = max(0, int((w - 4) * pct))
+        left, top, right, bottom = 2, 2, 2 + prog_w, h - 2
 
         if prog_w > 0:
-            segments = len(self._stops)-1
+            segments = len(self._stops) - 1
             for i in range(segments):
-                seg_start = i/segments; seg_end = (i+1)/segments
-                seg_left = left + int((right-left)*seg_start)
-                seg_right= left + int((right-left)*seg_end)
-                if seg_right <= seg_left: continue
-                steps = max(1, seg_right-seg_left)
+                seg_start = i / segments
+                seg_end = (i + 1) / segments
+                seg_left = left + int((right - left) * seg_start)
+                seg_right = left + int((right - left) * seg_end)
+                if seg_right <= seg_left:
+                    continue
+                steps = max(1, seg_right - seg_left)
                 for s in range(steps):
-                    t = s / max(1, steps-1)
-                    col = self._color_lerp(self._stops[i], self._stops[i+1], t)
+                    t = s / max(1, steps - 1)
+                    col = self._color_lerp(self._stops[i], self._stops[i + 1], t)
                     x1 = seg_left + s
                     self.create_line(x1, top, x1, bottom, fill=col)
+
             self._rounded_rect(left, top, right, bottom, r, outline="", fill="")
+
             if self._glow:
                 import math as _m
-                phase = (_m.sin(self._glow_phase)+1.0)*0.5
-                alpha = int(40 + phase*70)
-                glow_color = "#%02x%02x%02x" % (60+alpha, 120+alpha//2, 255)
-                for off in range(2,7):
-                    self.create_rectangle(left-off, top-off, right+off, bottom+off, outline=glow_color)
+                phase = (_m.sin(self._glow_phase) + 1.0) * 0.5
+                alpha = int(40 + phase * 70)
+                glow_color = "#%02x%02x%02x" % (60 + alpha, 120 + alpha // 2, 255)
+                for off in range(2, 7):
+                    self.create_rectangle(left - off, top - off, right + off, bottom + off, outline=glow_color)
 
-        self.create_text(w//2, h//2, text=f"{int(round(self._value))}%", fill=self._text_color, font=self._font)
+        # percentage label with dynamic contrast (white <50%, black ≥50%)
+        text_color = "#000000" if pct >= 0.5 else "#ffffff"
 
+        # optional soft shadow for readability
+        self.create_text(w // 2 + 1, h // 2 + 1, text=f"{int(round(self._value))}%", fill="#000000", font=self._font)
+        self.create_text(w // 2, h // 2, text=f"{int(round(self._value))}%", fill=text_color, font=self._font)
 
 # ---------------------- Main Application Window ----------------------
 
