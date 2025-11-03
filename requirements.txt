@@ -1,0 +1,13 @@
+# Core Python modules
+pymobiledevice3==4.4.0
+pillow==11.0.0
+pillow-heif==0.17.0
+
+# GUI framework (Tkinter ships with Python, so no install needed)
+
+# Packaging / build
+pyinstaller==6.11.0
+
+# Optional: utilities and logging
+tqdm==4.66.5
+requests==2.32.3
