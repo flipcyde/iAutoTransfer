@@ -12,6 +12,7 @@
 
 import os
 import re
+import threading
 from typing import Callable, Dict, List, Optional, Tuple
 from contextlib import contextmanager
 
@@ -39,6 +40,64 @@ except Exception:
         except Exception:
             UsbmuxClass = None
 
+
+def _safe_int(x, default=0):
+    try:
+        return int(x)
+    except Exception:
+        return default
+
+
+def _read_storage_from_lockdown(ld):
+    """
+    Read com.apple.disk_usage and return a storage dict matching the GUI expectation:
+      {"total": <bytes>, "used": <bytes>, "avail": <bytes>,
+       "data_total": <bytes>, "sys_total": <bytes>, "percent_used": <float>}
+    """
+    disk = {}
+    try:
+        # Modern domain (fast)
+        disk = ld.get_value(domain="com.apple.disk_usage") or {}
+    except Exception:
+        disk = {}
+
+    # Fallback: some stacks expose a 'DiskUsage' root dict (older/alt naming)
+    if not disk:
+        try:
+            du = ld.get_value(None, "DiskUsage")
+            if isinstance(du, dict):
+                disk = {
+                    "TotalDiskCapacity": du.get("TotalDiskCapacity") or du.get("TotalDataCapacity"),
+                    "AmountDataAvailable": du.get("AmountDataAvailable") or du.get("TotalDataAvailable"),
+                    "TotalDataCapacity": du.get("TotalDataCapacity"),
+                    "TotalSystemCapacity": du.get("TotalSystemCapacity"),
+                }
+        except Exception:
+            pass
+
+    total = _safe_int(disk.get("TotalDiskCapacity"))
+    data_total = _safe_int(disk.get("TotalDataCapacity"))
+    sys_total = _safe_int(disk.get("TotalSystemCapacity"))
+    avail = _safe_int(disk.get("AmountDataAvailable") or disk.get("FreeDiskCapacity"))
+    used = total - avail if total and avail >= 0 else 0
+
+    out = {}
+    if total > 0:
+        out["total"] = total
+    if used >= 0:
+        out["used"] = used
+    if avail >= 0:
+        out["avail"] = avail
+    if data_total > 0:
+        out["data_total"] = data_total
+    if sys_total > 0:
+        out["sys_total"] = sys_total
+    if out.get("total"):
+        t = float(out["total"]); u = float(out.get("used") or 0)
+        out["percent_used"] = (u / t * 100.0) if t > 0 else 0.0
+    return out
+
+
 # ---- media extensions ----
 MEDIA_EXT = tuple({
     ".jpg", ".jpeg", ".heic", ".png", ".raw", ".dng",
@@ -47,17 +106,22 @@ MEDIA_EXT = tuple({
 PHOTO_EXT = {".jpg", ".jpeg", ".heic", ".png", ".raw", ".dng"}
 VIDEO_EXT = {".mov", ".mp4", ".avi", ".hevc", ".m4v", ".3gp"}
 
+
 def _is_media(name: str) -> bool:
     return name.lower().endswith(MEDIA_EXT)
+
 
 def _is_photo(name: str) -> bool:
     return name.lower().endswith(tuple(PHOTO_EXT))
 
+
 def _is_video(name: str) -> bool:
     return name.lower().endswith(tuple(VIDEO_EXT))
 
+
 # filename-based YYYY/MM heuristics (IMG_20250118, VID_20241005, PXL_20240908, etc.)
 _DATE_RE = re.compile(r"(?:IMG|VID|PXL|MOV|DSC|CIMG)?[_-]?([12]\d{3})(\d{2})?(\d{2})?")
+
 
 def _guess_ym_from_name(name: str):
     m = _DATE_RE.search(name.upper())
@@ -73,6 +137,7 @@ def _guess_ym_from_name(name: str):
         except Exception:
             pass
     return int(yyyy) if yyyy else None, None
+
 
 # ---- usbmux helpers ----
 def _pick_first_device():
@@ -93,6 +158,7 @@ def _pick_first_device():
         raise RuntimeError("No iOS device via usbmux (unlock & Trust this computer).")
     raise RuntimeError("pymobiledevice3 usbmux API not available in this build.")
 
+
 @contextmanager
 def _afc_session():
     lockdown = svc = None
@@ -111,17 +177,20 @@ def _afc_session():
         yield lockdown, svc
     finally:
         try:
-            if svc: svc.close()
+            if svc:
+                svc.close()
         except Exception:
             pass
         try:
-            if lockdown and hasattr(lockdown, "close"): lockdown.close()
+            if lockdown and hasattr(lockdown, "close"):
+                lockdown.close()
         except Exception:
             pass
 
+
 # ---- public helpers ----
 def get_device_info(lockdown) -> Dict[str, str]:
-    """Best-effort Lockdown fields + storage/battery."""
+    """Best-effort Lockdown fields + storage/battery (legacy)."""
     info: Dict[str, str] = {}
     for key in ("DeviceName", "ProductVersion", "ProductType", "SerialNumber", "UniqueDeviceID"):
         try:
@@ -131,16 +200,16 @@ def get_device_info(lockdown) -> Dict[str, str]:
         except Exception:
             pass
 
-    # DiskUsage (data partition) from Lockdown
+    # Legacy DiskUsage (some stacks expose this)
     try:
         du = lockdown.get_value(None, "DiskUsage")
         if isinstance(du, dict):
             total = float(du.get("TotalDataCapacity") or 0.0)
-            free  = float(du.get("TotalDataAvailable") or 0.0)
-            used  = max(0.0, total - free)
+            free = float(du.get("TotalDataAvailable") or 0.0)
+            used = max(0.0, total - free)
             info["StorageTotalBytes"] = total
-            info["StorageFreeBytes"]  = free
-            info["StorageUsedBytes"]  = used
+            info["StorageFreeBytes"] = free
+            info["StorageUsedBytes"] = used
     except Exception:
         pass
 
@@ -160,14 +229,16 @@ def get_device_info(lockdown) -> Dict[str, str]:
 
     # Friendly aliases
     info["Name"] = info.get("DeviceName", "iPhone")
-    info["iOS"]  = info.get("ProductVersion", "")
+    info["iOS"] = info.get("ProductVersion", "")
     info["UDID"] = info.get("UniqueDeviceID", "")
     return info
+
 
 def summarize_counts(paths_sizes: List[Tuple[str, int]]):
     photos = sum(1 for p, _ in paths_sizes if _is_photo(os.path.basename(p)))
     videos = sum(1 for p, _ in paths_sizes if _is_video(os.path.basename(p)))
     return {"total": len(paths_sizes), "photos": photos, "videos": videos}
+
 
 def make_filter(year: Optional[int], month: Optional[int], kind: str):
     """Return a predicate(path)->bool enforcing kind/year/month."""
@@ -194,6 +265,7 @@ def make_filter(year: Optional[int], month: Optional[int], kind: str):
 
     return pred
 
+
 # ---- AFC/DCIM scan ----
 def _afc_listdir(svc, path: str):
     try:
@@ -201,11 +273,13 @@ def _afc_listdir(svc, path: str):
     except Exception:
         return []
 
+
 def _afc_stat(svc, path: str):
     try:
         return svc.stat(path)
     except Exception:
         return None
+
 
 def _walk_dcim(svc, root="/DCIM"):
     """Iterative walk of /DCIM returning (remote_path, size)."""
@@ -223,6 +297,7 @@ def _walk_dcim(svc, root="/DCIM"):
                 if _is_media(name):
                     size = int(st.get("st_size", 0) or 0)
                     yield full, size
+
 
 # ---- Public API ----
 def scan_media_afc(
@@ -244,56 +319,43 @@ def scan_media_afc(
     with _afc_session() as (lockdown, svc):
         di = get_device_info(lockdown)
 
-        # --- NEW: AFC filesystem usage (more direct than Lockdown) ---
-        # Some builds provide AfcService.get_fs_info() with FSTotalBytes/FSFreeBytes.
-        # We merge this into device_info["storage"] for the GUI.
-        try:
-            if hasattr(svc, "get_fs_info"):
-                fsinfo = svc.get_fs_info() or {}
-                fs_total = int(fsinfo.get("FSTotalBytes") or 0)
-                fs_free  = int(fsinfo.get("FSFreeBytes") or 0)
-            else:
-                fs_total = fs_free = 0
-        except Exception:
-            fs_total = fs_free = 0
+        # ---------- FAST PATH: start storage read in the background (non-blocking) ----------
+        storage_ready = {"done": False}
 
-        # Fallback to Lockdown DiskUsage if AFC not available
-        if fs_total <= 0 and ("StorageTotalBytes" in di):
+        def _bg_storage():
             try:
-                fs_total = int(float(di.get("StorageTotalBytes") or 0))
-                fs_free  = int(float(di.get("StorageFreeBytes")  or 0))
-            except Exception:
-                pass
+                storage = _read_storage_from_lockdown(lockdown)  # fast Lockdown call
+                if storage:
+                    di["storage"] = storage
+                    # legacy fallbacks for GUI versions that use these
+                    di.setdefault("StorageTotalBytes", float(storage.get("total") or 0))
+                    di.setdefault("StorageUsedBytes", float(storage.get("used") or 0))
+                    di.setdefault("StorageFreeBytes", float(storage.get("avail") or 0))
+                    if log_callback:
+                        try:
+                            gb = 1024 * 1024 * 1024
+                            log_callback(
+                                f"[storage] total={storage.get('total',0)/gb:.2f}GB "
+                                f"used={storage.get('used',0)/gb:.2f}GB "
+                                f"free={storage.get('avail',0)/gb:.2f}GB "
+                                f"({storage.get('percent_used',0):.0f}%)"
+                            )
+                        except Exception:
+                            pass
+            finally:
+                storage_ready["done"] = True
 
-        fs_used = max(0, fs_total - fs_free)
-        percent_used = (fs_used / fs_total * 100.0) if fs_total else 0.0
-        di["storage"] = {
-            "total": fs_total,
-            "free":  fs_free,
-            "used":  fs_used,
-            "percent_used": percent_used,
-        }
+        t = threading.Thread(target=_bg_storage, daemon=True)
+        t.start()
 
+        # Always log connection immediately (keeps UI snappy)
         if log_callback:
             try:
                 log_callback(f"Connected: {di.get('Name','iPhone')} (iOS {di.get('iOS','')})")
-                if fs_total > 0:
-                    mb = 1024 * 1024
-                    log_callback(
-                        f"[storage] used={fs_used/mb:.1f}MB / total={fs_total/mb:.1f}MB ({percent_used:.1f}%)"
-                    )
-                elif "StorageTotalBytes" in di:
-                    mb = 1024 * 1024
-                    log_callback(
-                        f"[storage] (Lockdown) used={float(di.get('StorageUsedBytes',0))/mb:.1f}MB "
-                        f"/ total={float(di.get('StorageTotalBytes',0))/mb:.1f}MB"
-                    )
-                else:
-                    log_callback("[storage] unable to query filesystem usage")
             except Exception:
                 pass
 
-        # Enumerate quickly; tick progress lightly every ~100 files
+        # ---------- Enumerate DCIM; tick progress lightly every ~100 files ----------
         for i, (path, size) in enumerate(_walk_dcim(svc)):
             total_seen += 1
             if filter_pred and not filter_pred(path):
@@ -302,8 +364,7 @@ def scan_media_afc(
             total_bytes += size
             if i % 100 == 0 and progress_callback:
                 try:
-                    # lightweight heartbeat (not overall % of total device DCIM)
-                    progress_callback((i % 100))  # 0..100 visual tick
+                    progress_callback((i % 100))  # heartbeat 0..100 (not overall %)
                 except Exception:
                     pass
 
@@ -312,6 +373,12 @@ def scan_media_afc(
                 progress_callback(100.0)
             except Exception:
                 pass
+
+        # Give the storage thread a tiny window to finish if it's already done (do not block UX)
+        try:
+            t.join(timeout=0.05)
+        except Exception:
+            pass
 
     totals = summarize_counts(items)
     if stats_callback:
