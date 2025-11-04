@@ -1,5 +1,5 @@
 # gui.py  — iAutoTransfer (AFC Edition, gradient UI + glow + controls + storage/filters + telemetry/retry/manifest)
-# Adds per-worker FILES count and sticky MBPS display.
+# Adds per-worker FILES count and sticky MBPS display + tooltips on controls.
 
 import os
 import time
@@ -12,6 +12,69 @@ from tkinter import ttk, filedialog, messagebox
 
 from scan_afc import scan_media_afc, make_filter
 from transfer_afc import TransferController
+
+
+# ---------------------- Tooltip helper (no deps) ----------------------
+
+class ToolTip:
+    def __init__(self, widget, text, delay_ms=350, wrap=60):
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self.wrap = wrap
+        self._id = None
+        self._tip = None
+        widget.bind("<Enter>", self._schedule)
+        widget.bind("<Leave>", self._hide)
+        widget.bind("<ButtonPress>", self._hide)
+
+    def _schedule(self, _):
+        self._unschedule()
+        self._id = self.widget.after(self.delay_ms, self._show)
+
+    def _unschedule(self):
+        if self._id:
+            try:
+                self.widget.after_cancel(self._id)
+            except Exception:
+                pass
+            self._id = None
+
+    def _show(self):
+        if self._tip or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self._tip = tk.Toplevel(self.widget)
+        self._tip.wm_overrideredirect(True)
+        self._tip.wm_geometry(f"+{x}+{y}")
+        frame = tk.Frame(self._tip, bg="#1e2530", bd=1, highlightthickness=0)
+        frame.pack()
+        lbl = tk.Label(
+            frame,
+            text=self.text,
+            justify="left",
+            bg="#1e2530",
+            fg="#e8eef7",
+            font=("Segoe UI", 9),
+            wraplength=self.wrap * 7,
+            padx=8,
+            pady=6,
+        )
+        lbl.pack()
+
+    def _hide(self, _=None):
+        self._unschedule()
+        if self._tip:
+            try:
+                self._tip.destroy()
+            except Exception:
+                pass
+            self._tip = None
+
+
+def bind_tooltip(widget, text):
+    ToolTip(widget, text)
 
 
 # ---------------------- Gradient Progress Widget ----------------------
@@ -122,6 +185,11 @@ class GradientProgress(tk.Canvas):
         # percentage label with dynamic contrast (white <50%, black ≥50%)
         text_color = "#000000" if pct >= 0.5 else "#ffffff"
 
+
+        # optional soft shadow for readability
+        self.create_text(w // 2 + 1, h // 2 + 1, text=f"{int(round(self._value))}%", fill="#000000", font=self._font)
+        self.create_text(w // 2, h // 2, text=f"{int(round(self._value))}%", fill=text_color, font=self._font)
+
         # optional soft shadow for readability
         self.create_text(w // 2 + 1, h // 2 + 1, text=f"{int(round(self._value))}%", fill="#000000", font=self._font)
         self.create_text(w // 2, h // 2, text=f"{int(round(self._value))}%", fill=text_color, font=self._font)
@@ -168,8 +236,10 @@ class AppWindow(tk.Tk):
     def _build_styles(self):
         self["bg"] = "#0f1317"
         style = ttk.Style(self)
-        try: style.theme_use("clam")
-        except Exception: pass
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
 
         style.configure("TFrame", background="#0f1317")
         style.configure("Header.TFrame", background="#101720")
@@ -234,23 +304,44 @@ class AppWindow(tk.Tk):
         self.dest_var = tk.StringVar()
         self.dest_entry = ttk.Entry(controls, textvariable=self.dest_var, width=72)
         self.dest_entry.grid(row=0, column=1, sticky="we", padx=(0, 8), pady=10)
-        ttk.Button(controls, text="Browse…", command=self._on_browse, style="TButton").grid(row=0, column=2, sticky="w", padx=(0, 8), pady=10)
+        self.browse_btn = ttk.Button(controls, text="Browse…", command=self._on_browse, style="TButton")
+        self.browse_btn.grid(row=0, column=2, sticky="w", padx=(0, 8), pady=10)
+        bind_tooltip(self.browse_btn, "Choose where files will be saved on your computer.")
 
         self.scan_btn = ttk.Button(controls, text="Scan (AFC)", command=self._on_scan, style="Accent.TButton")
         self.scan_btn.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="w")
+        bind_tooltip(self.scan_btn, "Scans your iPhone /DCIM via AFC and lists media with the filters below.")
+
         self.transfer_btn = ttk.Button(controls, text="Transfer", command=self._on_transfer, style="Accent.TButton")
         self.transfer_btn.grid(row=1, column=1, padx=(0, 8), pady=(0, 10), sticky="w")
+        bind_tooltip(self.transfer_btn, "Start copying to the destination folder using worker threads.")
+
         self.pause_btn = ttk.Button(controls, text="Pause", command=self._on_pause, style="TButton")
         self.pause_btn.grid(row=1, column=3, padx=(0, 8), pady=(0, 10), sticky="w")
+        bind_tooltip(self.pause_btn, "Pause/resume active workers without cancelling the run.")
+
         self.stop_btn = ttk.Button(controls, text="Stop", command=self._on_stop, style="Danger.TButton")
         self.stop_btn.grid(row=1, column=4, padx=(0, 8), pady=(0, 10), sticky="w")
+        bind_tooltip(self.stop_btn, "Request a clean stop. Workers finish their current file, then exit.")
 
+        # Define these BEFORE creating the checkboxes
         self.flatten_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(controls, text="Flatten output", variable=self.flatten_var).grid(row=1, column=5, padx=(8, 0), pady=(0, 10), sticky="w")
         self.heic_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(controls, text="Convert HEIC → JPEG", variable=self.heic_var).grid(row=1, column=6, padx=(8, 0), pady=(0, 10), sticky="w")
         self.del_heic_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(controls, text="Delete HEIC after convert", variable=self.del_heic_var).grid(row=1, column=7, padx=(8, 0), pady=(0, 10), sticky="w")
+
+        # Checkboxes
+        self.flatten_cb = ttk.Checkbutton(controls, text="Flatten output", variable=self.flatten_var)
+        self.flatten_cb.grid(row=1, column=5, padx=(8, 0), pady=(0, 10), sticky="w")
+        bind_tooltip(self.flatten_cb, "Save all files directly in the destination folder (no DCIM subfolders).")
+
+        self.heic_cb = ttk.Checkbutton(controls, text="Convert HEIC → JPEG", variable=self.heic_var)
+        self.heic_cb.grid(row=1, column=6, padx=(8, 0), pady=(0, 10), sticky="w")
+        bind_tooltip(self.heic_cb, "After copying, convert .HEIC photos to .JPG (requires pillow-heif).")
+
+        self.del_heic_cb = ttk.Checkbutton(controls, text="Delete HEIC after convert", variable=self.del_heic_var)
+        self.del_heic_cb.grid(row=1, column=7, padx=(8, 0), pady=(0, 10), sticky="w")
+        bind_tooltip(self.del_heic_cb, "Delete the original .HEIC after a successful conversion to JPEG. Use with care.")
+
         controls.columnconfigure(1, weight=1)
 
         # Filters row
@@ -258,23 +349,37 @@ class AppWindow(tk.Tk):
         filters.pack(side="top", fill="x", padx=16, pady=(0, 10))
         ttk.Label(filters, text="Type:", style="TLabel").pack(side="left", padx=(12, 4))
         self.type_var = tk.StringVar(value="all")
-        ttk.Combobox(filters, textvariable=self.type_var, values=["all","photos","videos"], width=10, state="readonly").pack(side="left")
+        self.type_cb = ttk.Combobox(filters, textvariable=self.type_var, values=["all", "photos", "videos"], width=10, state="readonly")
+        self.type_cb.pack(side="left")
+        bind_tooltip(self.type_cb, "Media kind filter. ‘photos’ = JPG/HEIC/PNG/DNG. ‘videos’ = MOV/MP4/HEVC/M4V/AVI.")
+
         ttk.Label(filters, text="Year:", style="TLabel").pack(side="left", padx=(16, 4))
         self.year_var = tk.StringVar(value="All")
         years = ["All"] + [str(y) for y in range(2015, 2036)]
-        ttk.Combobox(filters, textvariable=self.year_var, values=years, width=8, state="readonly").pack(side="left")
+        self.year_cb = ttk.Combobox(filters, textvariable=self.year_var, values=years, width=8, state="readonly")
+        self.year_cb.pack(side="left")
+        bind_tooltip(self.year_cb, "Year filter from filename heuristics (e.g., IMG_YYYYMMDD). Choose ‘All’ for no filter.")
+
         ttk.Label(filters, text="Month:", style="TLabel").pack(side="left", padx=(16, 4))
         self.month_var = tk.StringVar(value="All")
-        months = ["All"] + [f"{m:02d}" for m in range(1,13)]
-        ttk.Combobox(filters, textvariable=self.month_var, values=months, width=6, state="readonly").pack(side="left")
+        months = ["All"] + [f"{m:02d}" for m in range(1, 13)]
+        self.month_cb = ttk.Combobox(filters, textvariable=self.month_var, values=months, width=6, state="readonly")
+        self.month_cb.pack(side="left")
+        bind_tooltip(self.month_cb, "Month filter (01–12) from filename heuristics. Choose ‘All’ for no filter.")
+
         ttk.Separator(filters, orient="vertical").pack(side="left", fill="y", padx=10)
         ttk.Label(filters, text="Workers:", style="TLabel").pack(side="left", padx=(10, 4))
+
         self.workers_var = tk.IntVar(value=3)
         self.workers_spin = ttk.Spinbox(filters, from_=1, to=8, textvariable=self.workers_var, width=4, command=self._on_workers_changed)
         self.workers_spin.pack(side="left")
+        bind_tooltip(self.workers_spin, "Parallel copy threads. Increase for speed; reduce if AFC errors appear. Can change during a transfer.")
+
         ttk.Separator(filters, orient="vertical").pack(side="left", fill="y", padx=10)
         self.manifest_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(filters, text="Write Manifest CSV", variable=self.manifest_var).pack(side="left", padx=(4, 0))
+        self.manifest_cb = ttk.Checkbutton(filters, text="Write Manifest CSV", variable=self.manifest_var)
+        self.manifest_cb.pack(side="left", padx=(4, 0))
+        bind_tooltip(self.manifest_cb, "Write a CSV log (manifest_*.csv) with remote path, local path, size, and timestamp.")
 
         # Stats & Progress
         stats_card = ttk.Frame(self, style="Card.TFrame")
@@ -292,20 +397,10 @@ class AppWindow(tk.Tk):
         # Worker Telemetry
         tele_card = ttk.Frame(self, style="Card.TFrame")
         tele_card.pack(side="top", fill="x", padx=16, pady=(0, 10))
-        ttk.Label(
-            tele_card,
-            text="Workers",
-            style="Header.TLabel"
-        ).pack(anchor="w", padx=12, pady=(10, 4))
+        ttk.Label(tele_card, text="Workers", style="Header.TLabel").pack(anchor="w", padx=12, pady=(10, 4))
 
         cols = ("id", "status", "files", "mbps", "last")
-        self.workers_tv = ttk.Treeview(
-            tele_card,
-            columns=cols,
-            show="headings",
-            height=4
-        )
-
+        self.workers_tv = ttk.Treeview(tele_card, columns=cols, show="headings", height=4)
         for c, w, anc, stretch in (
             ("id", 60, "center", False),
             ("status", 120, "w", False),
@@ -315,14 +410,20 @@ class AppWindow(tk.Tk):
         ):
             self.workers_tv.heading(c, text=c.upper(), anchor=anc)
             self.workers_tv.column(c, width=w, anchor=anc, stretch=stretch)
-
         self.workers_tv.pack(fill="x", padx=12, pady=(0, 10))
-
+        bind_tooltip(self.workers_tv,
+                     "Per-worker telemetry:\n"
+                     "ID — worker number\n"
+                     "STATUS — idle/copying/ok/failed/skipped\n"
+                     "FILES — attempts processed\n"
+                     "MBPS — last measured throughput (sticks)\n"
+                     "LAST — last file handled")
 
         # Failed Copies + Retry
         fail_card = ttk.Frame(self, style="Card.TFrame")
         fail_card.pack(side="top", fill="x", padx=16, pady=(0, 10))
-        hdr = ttk.Frame(fail_card, style="Card.TFrame"); hdr.pack(side="top", fill="x")
+        hdr = ttk.Frame(fail_card, style="Card.TFrame")
+        hdr.pack(side="top", fill="x")
         ttk.Label(hdr, text="Failed Copies", style="Header.TLabel").pack(side="left", padx=12, pady=(8, 4))
         self.retry_btn = ttk.Button(hdr, text="Retry Failed", command=self._on_retry_failed)
         self.retry_btn.pack(side="right", padx=12, pady=(8, 4))
@@ -349,7 +450,8 @@ class AppWindow(tk.Tk):
 
     # ---------- Helpers ----------
     def _append_log(self, msg, tag="info"):
-        if self._closing: return
+        if self._closing:
+            return
         self.log_q.put((msg, tag))
 
     def _pump_log(self):
@@ -363,15 +465,18 @@ class AppWindow(tk.Tk):
         if not self._closing:
             self.after(40, self._pump_log)
 
-    def _set_status(self, text): self.stats_lbl.config(text=text)
+    def _set_status(self, text):
+        self.stats_lbl.config(text=text)
 
     def _update_header_device(self):
         di = getattr(self, "last_device_info", {}) or {}
         name = di.get("Name", "iPhone")
         ios = di.get("iOS", "?")
         udid = di.get("UDID", "")
-        if udid: udid = udid[:8] + "…"
-        bat = di.get("BatteryPercent"); chg = di.get("BatteryCharging")
+        if udid:
+            udid = udid[:8] + "…"
+        bat = di.get("BatteryPercent")
+        chg = di.get("BatteryCharging")
         battxt = f" • {bat}%{' (charging)' if chg else ''}" if bat is not None else ""
         self.device_lbl.config(text=f"{name} • iOS {ios}{battxt} • {udid}")
 
@@ -389,13 +494,17 @@ class AppWindow(tk.Tk):
             self.storage_var.set("Storage: —")
 
     def _on_progress(self, pct):
-        try: self.progress.set(float(pct))
-        except Exception: pass
+        try:
+            self.progress.set(float(pct))
+        except Exception:
+            pass
 
     def _calc_eta(self, bytes_done, bytes_total, bps):
-        if bytes_total <= 0 or bps <= 0: return "—"
+        if bytes_total <= 0 or bps <= 0:
+            return "—"
         remain = max(0, bytes_total - bytes_done) / bps
-        m = int(remain // 60); s = int(remain % 60)
+        m = int(remain // 60)
+        s = int(remain % 60)
         return f"{m}m{s:02d}s"
 
     # ---------- Scan / Transfer ----------
@@ -410,7 +519,8 @@ class AppWindow(tk.Tk):
 
     def _on_browse(self):
         path = filedialog.askdirectory(title="Select destination folder")
-        if path: self.dest_var.set(path)
+        if path:
+            self.dest_var.set(path)
 
     def _disable_buttons(self):
         self.scan_btn.config(state="disabled")
@@ -421,7 +531,8 @@ class AppWindow(tk.Tk):
         self.transfer_btn.config(state="normal")
 
     def _on_scan(self):
-        if self._scan_thread and self._scan_thread.is_alive(): return
+        if self._scan_thread and self._scan_thread.is_alive():
+            return
         self._disable_buttons()
         self.pause_btn.config(state="disabled")
         self.stop_btn.config(state="disabled")
@@ -447,7 +558,7 @@ class AppWindow(tk.Tk):
                 self.last_device_info = di or {}
                 self._update_header_device()
                 self._update_storage_bar()
-                self._append_log(f"Scan complete: {totals.get('total',0)} files", "good")
+                self._append_log(f"Scan complete: {totals.get('total', 0)} files", "good")
                 self._append_log("==== SCAN END ====", "dim")
             except Exception as e:
                 self._append_log(f"Scan error: {e}", "err")
@@ -458,17 +569,21 @@ class AppWindow(tk.Tk):
         self._scan_thread.start()
 
     def _on_transfer(self):
-        if self._xfer_thread and self._xfer_thread.is_alive(): return
+        if self._xfer_thread and self._xfer_thread.is_alive():
+            return
         items = getattr(self, "last_scan_items", [])
         if not items:
-            messagebox.showinfo("iAutoTransfer", "Nothing to transfer. Please run Scan first."); return
+            messagebox.showinfo("iAutoTransfer", "Nothing to transfer. Please run Scan first.")
+            return
         dest = self.dest_var.get().strip()
         if not dest:
-            messagebox.showinfo("iAutoTransfer", "Please select a destination folder."); return
+            messagebox.showinfo("iAutoTransfer", "Please select a destination folder.")
+            return
         try:
             os.makedirs(dest, exist_ok=True)
         except Exception as e:
-            messagebox.showerror("iAutoTransfer", f"Cannot create destination:\n{e}"); return
+            messagebox.showerror("iAutoTransfer", f"Cannot create destination:\n{e}")
+            return
 
         # reset per-worker sticky state
         self._w_last_mbps.clear()
@@ -479,7 +594,8 @@ class AppWindow(tk.Tk):
         self._disable_buttons()
         self.pause_btn.config(state="normal", text="Pause")
         self.stop_btn.config(state="normal")
-        self.progress.set(0); self.progress.start_glow()
+        self.progress.set(0)
+        self.progress.start_glow()
         self.rate_lbl.config(text="0.00 files/s | 0.00 MB/s | ETA —")
         self._append_log(f"Starting transfer to {dest}", "info")
         total = len(items)
@@ -494,7 +610,7 @@ class AppWindow(tk.Tk):
             try:
                 self._manifest_fp = open(manifest_path, "w", newline="", encoding="utf-8")
                 manifest_writer = csv.writer(self._manifest_fp)
-                manifest_writer.writerow(["remote_path","local_path","size_bytes","copied_at","was_converted_to_jpeg"])
+                manifest_writer.writerow(["remote_path", "local_path", "size_bytes", "copied_at", "was_converted_to_jpeg"])
                 self._append_log(f"Writing manifest → {manifest_path}", "dim")
             except Exception as e:
                 self._append_log(f"Manifest open failed: {e}", "warn")
@@ -533,8 +649,10 @@ class AppWindow(tk.Tk):
                 self.pause_btn.config(state="disabled", text="Pause")
                 self.stop_btn.config(state="disabled")
                 try:
-                    if self._manifest_fp: self._manifest_fp.close()
-                except Exception: pass
+                    if self._manifest_fp:
+                        self._manifest_fp.close()
+                except Exception:
+                    pass
                 self._manifest_fp = None
                 self._xfer_controller = None
 
@@ -542,7 +660,8 @@ class AppWindow(tk.Tk):
         self._xfer_thread.start()
 
     def _on_pause(self):
-        if not self._xfer_controller: return
+        if not self._xfer_controller:
+            return
         if self.pause_btn.cget("text") == "Pause":
             self._xfer_controller.pause()
             self.pause_btn.config(text="Resume")
@@ -559,8 +678,10 @@ class AppWindow(tk.Tk):
 
     # ---------- Live wiring from controller ----------
     def _on_workers_changed(self):
-        try: new_count = int(self.workers_var.get())
-        except Exception: return
+        try:
+            new_count = int(self.workers_var.get())
+        except Exception:
+            return
         if self._xfer_controller and self._xfer_controller.is_running():
             try:
                 self._xfer_controller.scale_workers(new_count)
@@ -608,7 +729,8 @@ class AppWindow(tk.Tk):
 
     def _on_retry_failed(self):
         if not self._xfer_controller or not hasattr(self._xfer_controller, "retry_failed"):
-            self._append_log("Retry requires an active/new transfer.", "warn"); return
+            self._append_log("Retry requires an active/new transfer.", "warn")
+            return
         try:
             self._xfer_controller.retry_failed()
             self._append_log("Queued failed items for retry.", "info")
@@ -625,11 +747,14 @@ class AppWindow(tk.Tk):
             pass
         self.progress.stop_glow()
         try:
-            if self._manifest_fp: self._manifest_fp.close()
-        except Exception: pass
+            if self._manifest_fp:
+                self._manifest_fp.close()
+        except Exception:
+            pass
         self.destroy()
 
-    def run(self): self.mainloop()
+    def run(self):
+        self.mainloop()
 
 
 if __name__ == "__main__":
