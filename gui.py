@@ -1,5 +1,6 @@
 # gui.py  — iAutoTransfer (AFC Edition, gradient UI + glow + controls + storage/filters + telemetry/retry/manifest)
 # Adds per-worker FILES count and sticky MBPS display + tooltips on controls.
+# Also greys out the entire UI with an overlay if Apple drivers are missing.
 
 import os
 import time
@@ -7,11 +8,30 @@ import math
 import csv
 import threading
 import queue
+import subprocess
+import shutil
+import tempfile
+import webbrowser
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk, filedialog, messagebox
 
 from scan_afc import scan_media_afc, make_filter
 from transfer_afc import TransferController
+from apple_sanity import sanity_check_apple_drivers
+
+# ---------------------- Config for driver workflow ----------------------
+# If you ship driver MSIs with your app, place them here:
+BUNDLED_DRIVER_DIR = Path("extras/apple_drivers")
+# Typical filenames you may include:
+#   AppleApplicationSupport.msi
+#   AppleApplicationSupport64.msi
+#   AppleMobileDeviceSupport.msi
+#   AppleMobileDeviceSupport64.msi
+
+# Download links if user prefers getting iTunes:
+ITUNES_DOWNLOAD_URL = "https://www.apple.com/itunes/download/"
+ITUNES_MICROSOFT_STORE_URL = "https://apps.microsoft.com/detail/itunes/9pb2mz1zmb1s"
 
 
 # ---------------------- Tooltip helper (no deps) ----------------------
@@ -185,14 +205,10 @@ class GradientProgress(tk.Canvas):
         # percentage label with dynamic contrast (white <50%, black ≥50%)
         text_color = "#000000" if pct >= 0.5 else "#ffffff"
 
-
         # optional soft shadow for readability
         self.create_text(w // 2 + 1, h // 2 + 1, text=f"{int(round(self._value))}%", fill="#000000", font=self._font)
         self.create_text(w // 2, h // 2, text=f"{int(round(self._value))}%", fill=text_color, font=self._font)
 
-        # optional soft shadow for readability
-        self.create_text(w // 2 + 1, h // 2 + 1, text=f"{int(round(self._value))}%", fill="#000000", font=self._font)
-        self.create_text(w // 2, h // 2, text=f"{int(round(self._value))}%", fill=text_color, font=self._font)
 
 # ---------------------- Main Application Window ----------------------
 
@@ -231,6 +247,74 @@ class AppWindow(tk.Tk):
                 os.makedirs(pictures, exist_ok=True)
         self.dest_var.set(pictures)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # ---- Apple drivers sanity check: if false => grey out and overlay
+        try:
+            ok = bool(sanity_check_apple_drivers())
+        except Exception:
+            ok = False
+        if not ok:
+            self._set_interactive_enabled(False)
+            self._show_driver_overlay()
+
+    # ---------- Grey-out / overlay helpers ----------
+    def _set_interactive_enabled(self, enabled: bool):
+        """Enable/disable most interactive widgets recursively."""
+        target_state = "normal" if enabled else "disabled"
+
+        def _walk(widget):
+            for child in widget.winfo_children():
+                try:
+                    if isinstance(child, (ttk.Button, ttk.Entry, ttk.Checkbutton, ttk.Combobox, ttk.Spinbox)):
+                        child.configure(state=target_state)
+                except Exception:
+                    pass
+                _walk(child)
+        _walk(self)
+
+        # keep the log readable
+        try:
+            self.log.configure(state="normal")
+        except Exception:
+            pass
+
+    def _show_driver_overlay(self):
+        try:
+            self._driver_overlay.destroy()
+        except Exception:
+            pass
+        self._driver_overlay = tk.Frame(self, bg="#0f1317")
+        self._driver_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+        card = tk.Frame(self._driver_overlay, bg="#151b22", bd=0, highlightthickness=1, highlightbackground="#263344")
+        card.place(relx=0.5, rely=0.5, anchor="center", width=640, height=260)
+
+        lbl_title = tk.Label(card, text="Apple drivers not detected", bg="#151b22", fg="#e8eef7",
+                             font=("Segoe UI Semibold", 16))
+        lbl_title.pack(pady=(18, 6))
+
+        msg = ("iAutoTransfer requires Apple Mobile Device Support (or iTunes) to talk to your iPhone.\n"
+               "Install the drivers directly, or install iTunes (which includes them).")
+        lbl_msg = tk.Label(card, text=msg, bg="#151b22", fg="#9aa7b2", font=("Segoe UI", 10), justify="center")
+        lbl_msg.pack(pady=(0, 16))
+
+        btn_row = tk.Frame(card, bg="#151b22")
+        btn_row.pack()
+
+        ttk.Button(btn_row, text="Install Drivers", style="Accent.TButton",
+                   command=self._on_install_drivers).grid(row=0, column=0, padx=8, pady=6)
+        ttk.Button(btn_row, text="Download iTunes",
+                   command=self._on_download_itunes).grid(row=0, column=1, padx=8, pady=6)
+        ttk.Button(btn_row, text="Exit",
+                   command=self._on_exit_app).grid(row=0, column=2, padx=8, pady=6)
+
+    def _hide_driver_overlay(self):
+        try:
+            self._driver_overlay.destroy()
+            self._driver_overlay = None
+        except Exception:
+            pass
+        self._set_interactive_enabled(True)
 
     # ---------- Styles / Theme ----------
     def _build_styles(self):
@@ -531,6 +615,9 @@ class AppWindow(tk.Tk):
         self.transfer_btn.config(state="normal")
 
     def _on_scan(self):
+        # If UI is greyed due to drivers missing, do nothing
+        if hasattr(self, "_driver_overlay"):
+            return
         if self._scan_thread and self._scan_thread.is_alive():
             return
         self._disable_buttons()
@@ -569,6 +656,15 @@ class AppWindow(tk.Tk):
         self._scan_thread.start()
 
     def _on_transfer(self):
+        # If UI is greyed due to drivers missing, do nothing
+        if hasattr(self, "_driver_overlay"):
+            messagebox.showerror(
+                "Apple Drivers Required",
+                "Transfers require Apple Mobile Device Support. Please install drivers and relaunch.",
+                parent=self
+            )
+            return
+
         if self._xfer_thread and self._xfer_thread.is_alive():
             return
         items = getattr(self, "last_scan_items", [])
@@ -632,7 +728,7 @@ class AppWindow(tk.Tk):
             flatten=self.flatten_var.get(),
             convert_heic=self.heic_var.get(),
             delete_heic_after_convert=self.del_heic_var.get(),
-            worker_callback=self._on_worker_update_from_thread,   # ← live telemetry
+            worker_callback=self._on_worker_update_from_thread,
             failed_callback=self._on_failed_from_thread,
             manifest_writer=manifest_writer,
         )
@@ -701,15 +797,13 @@ class AppWindow(tk.Tk):
             self._w_last_mbps.setdefault(wid, 0.0)
             self._w_files.setdefault(wid, 0)
 
-        # status
         status = info.get("status", "—")
-        # files (attempts processed)
+
         files = info.get("files")
         if isinstance(files, int):
             self._w_files[wid] = files
         files_disp = self._w_files.get(wid, 0)
 
-        # mbps: keep sticky last non-zero unless explicitly provided
         if "mbps" in info and info["mbps"] is not None:
             try:
                 mb = float(info["mbps"])
@@ -736,6 +830,154 @@ class AppWindow(tk.Tk):
             self._append_log("Queued failed items for retry.", "info")
         except Exception as e:
             self._append_log(f"Retry error: {e}", "err")
+
+    # ---------- Driver overlay actions & install helpers ----------
+    def _open_url(self, url: str):
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            messagebox.showerror("Open URL", f"Could not open browser:\n{e}")
+
+    def _on_download_itunes(self):
+        # Prefer Microsoft Store on Windows
+        self._open_url(ITUNES_MICROSOFT_STORE_URL or ITUNES_DOWNLOAD_URL)
+
+    def _on_exit_app(self):
+        self._on_close()
+
+    def _run_msi(self, msi_path: Path):
+        """Run an MSI with msiexec (use /passive for visible progress; /quiet for silent)."""
+        try:
+            subprocess.check_call(["msiexec", "/i", str(msi_path), "/passive"])
+            return True
+        except subprocess.CalledProcessError as e:
+            messagebox.showerror("Driver Install", f"Installer failed:\n{e}")
+        except Exception as e:
+            messagebox.showerror("Driver Install", f"Could not start installer:\n{e}")
+        return False
+
+    def _try_install_bundled_msis(self):
+        """
+        If you ship driver MSIs in extras/apple_drivers, install them here.
+        Typical files:
+          - AppleApplicationSupport.msi / AppleApplicationSupport64.msi
+          - AppleMobileDeviceSupport.msi / AppleMobileDeviceSupport64.msi
+        """
+        base = BUNDLED_DRIVER_DIR
+        if not base.exists():
+            return False
+
+        candidates = [
+            "AppleApplicationSupport64.msi",
+            "AppleApplicationSupport.msi",
+            "AppleMobileDeviceSupport64.msi",
+            "AppleMobileDeviceSupport.msi",
+        ]
+        found = [base / name for name in candidates if (base / name).exists()]
+        if not found:
+            return False
+
+        ok_any = False
+        for msi in found:
+            self._append_log(f"Launching installer: {msi}", "dim")
+            if self._run_msi(msi):
+                ok_any = True
+        return ok_any
+
+    def _find_7z(self):
+        """Return a 7z/7za executable path if found on PATH, else None."""
+        for exe in ("7z.exe", "7za.exe"):
+            p = shutil.which(exe)
+            if p:
+                return p
+        return None
+
+    def _extract_and_install_from_itunes_exe(self, itunes_exe_path: Path):
+        """
+        Use 7-Zip to extract Apple MSIs out of iTunes*.exe and run them.
+        Requires 7z/7za in PATH.
+        """
+        seven = self._find_7z()
+        if not seven:
+            messagebox.showinfo(
+                "7-Zip required",
+                "To extract drivers from the iTunes installer, install 7-Zip and ensure 7z.exe is on PATH.\n"
+                "Alternatively, download iTunes from Microsoft Store."
+            )
+            return False
+
+        self._append_log(f"Extracting from: {itunes_exe_path}", "dim")
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            try:
+                subprocess.check_call([seven, "x", "-y", str(itunes_exe_path)], cwd=td)
+            except subprocess.CalledProcessError as e:
+                messagebox.showerror("Extract", f"Failed to extract with 7-Zip:\n{e}")
+                return False
+
+            want = {
+                "AppleApplicationSupport64.msi",
+                "AppleApplicationSupport.msi",
+                "AppleMobileDeviceSupport64.msi",
+                "AppleMobileDeviceSupport.msi",
+            }
+            msis = []
+            for root, _, files in os.walk(td):
+                for f in files:
+                    if f in want:
+                        msis.append(Path(root) / f)
+
+            if not msis:
+                messagebox.showwarning("Extract", "No driver MSIs found inside the iTunes installer.")
+                return False
+
+            ok_any = False
+            for msi in msis:
+                self._append_log(f"Installing extracted MSI: {msi}", "dim")
+                if self._run_msi(msi):
+                    ok_any = True
+            return ok_any
+
+    def _on_install_drivers(self):
+        """
+        Try in order:
+         1) Install bundled MSIs (if shipped in extras/apple_drivers)
+         2) Ask user to pick an iTunes installer EXE and extract drivers with 7-Zip
+        After install, re-check sanity and re-enable UI if OK.
+        """
+        # 1) Bundled route
+        if self._try_install_bundled_msis():
+            self._append_log("Installers completed. Rechecking driver sanity…", "info")
+            self._post_install_recheck()
+            return
+
+        # 2) Let user select an iTunes EXE
+        itunes_path = filedialog.askopenfilename(
+            title="Select iTunes installer (EXE)",
+            filetypes=[("iTunes Installer", "*.exe"), ("All files", "*.*")]
+        )
+        if not itunes_path:
+            return
+        itunes_path = Path(itunes_path)
+
+        if self._extract_and_install_from_itunes_exe(itunes_path):
+            self._append_log("Installers completed. Rechecking driver sanity…", "info")
+            self._post_install_recheck()
+
+    def _post_install_recheck(self):
+        try:
+            ok = bool(sanity_check_apple_drivers())
+        except Exception:
+            ok = False
+
+        if ok:
+            self._append_log("Apple drivers detected. Enabling UI.", "good")
+            self._hide_driver_overlay()
+        else:
+            messagebox.showwarning(
+                "Drivers not detected",
+                "Still not seeing the Apple drivers. You may need to reboot, or install from the Microsoft Store."
+            )
 
     # ---------- Lifecycle ----------
     def _on_close(self):
